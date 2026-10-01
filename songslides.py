@@ -26,6 +26,7 @@ MIN_FITTED_TITLE_SIZE = 20
 COUNTER_SIZE = 24
 TOC_ENTRY_SIZE = 20
 TOC_MIN_ENTRY_SIZE = 12
+TOC_MIN_SINGLE_LINE_SIZE = 14  # a long title shrinks alone, down to this, to stay on one line
 TOC_LINE_GAP_EM = 6 / 20
 TOC_COLUMNS = 2
 TOC_SONGS_PER_COLUMN = 10
@@ -52,6 +53,7 @@ TOC_COLUMN_GAP = Inches(0.2)
 # about half an em per character.
 CHAR_WIDTH_EM = 0.5
 BOLD_CHAR_WIDTH_EM = 0.56
+TOC_CHAR_WIDTH_EM = 0.42  # measured ~0.41 for Calibri (and metric-identical Carlito) titles
 LINE_HEIGHT_EM = 1.2
 STANZA_LINE_GAP_EM = 16 / 28  # 16pt after each line at the default 28pt
 
@@ -164,10 +166,11 @@ def fit_font_size(lines: list[str], width_pt: float, height_pt: float, size: int
     return min_size
 
 
-def fit_single_line(text: str, width_pt: float, size: int, min_size: int) -> int:
-    """Largest size <= `size` at which bold `text` stays on one line."""
+def fit_single_line(text: str, width_pt: float, size: int, min_size: int,
+                    char_em: float = BOLD_CHAR_WIDTH_EM) -> int:
+    """Largest size <= `size` at which `text` (bold by default) stays on one line."""
     for candidate in range(size, min_size - 1, -1):
-        if _wrapped_line_count(text, width_pt, candidate, BOLD_CHAR_WIDTH_EM) == 1:
+        if _wrapped_line_count(text, width_pt, candidate, char_em) == 1:
             return candidate
     return min_size
 
@@ -276,10 +279,11 @@ def _add_toc_slides(prs, layout, entries, style):
     pages = math.ceil(len(entries) / TOC_SONGS_PER_SLIDE)
     column_width = (prs.slide_width - 2 * SIDE_MARGIN - TOC_COLUMN_GAP * (TOC_COLUMNS - 1)) // TOC_COLUMNS
     column_height = prs.slide_height - TOC_TOP - TOC_BOTTOM_MARGIN
+    text_width = _pt(column_width - TEXT_INSET)  # TOC columns have no right inset
     labels = [f"{n:2d}. {title}" for n, (title, _) in enumerate(entries, start=1)]
     columns = [labels[i:i + TOC_SONGS_PER_COLUMN] for i in range(0, len(labels), TOC_SONGS_PER_COLUMN)]
     # One entry size for every TOC page: the largest that lets each column fit.
-    size = min(fit_font_size(column, _pt(column_width - 2 * TEXT_INSET), _pt(column_height),
+    size = min(fit_font_size(column, text_width, _pt(column_height),
                              TOC_ENTRY_SIZE, TOC_MIN_ENTRY_SIZE, gap_em=TOC_LINE_GAP_EM)
                for column in columns)
 
@@ -296,9 +300,12 @@ def _add_toc_slides(prs, layout, entries, style):
                 break
             left = SIDE_MARGIN + column * (column_width + TOC_COLUMN_GAP)
             frame = _text_box(slide, left, TOC_TOP, column_width, column_height)
+            frame.margin_right = 0
             for i, (label, (_, target)) in enumerate(column_entries):
                 paragraph = frame.paragraphs[0] if i == 0 else frame.add_paragraph()
-                run = _write(paragraph, label, style.font_family, size, LINK_BLUE,
+                entry_size = fit_single_line(label, text_width, size,
+                                             min(TOC_MIN_SINGLE_LINE_SIZE, size), TOC_CHAR_WIDTH_EM)
+                run = _write(paragraph, label, style.font_family, entry_size, LINK_BLUE,
                              space_after=round(size * TOC_LINE_GAP_EM))
                 _link_to_slide(run, slide, target)
     return pages

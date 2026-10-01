@@ -9,10 +9,12 @@ const MIN_FITTED_CONTENT = 16;
 const MIN_FITTED_TITLE = 20;
 const TOC_ENTRY_SIZE = 20;
 const TOC_MIN_ENTRY_SIZE = 12;
+const TOC_MIN_SINGLE_LINE_SIZE = 14;
 const TOC_PER_COLUMN = 10;
 const TOC_PER_SLIDE = 20;
 const CHAR_EM = 0.5;
 const BOLD_CHAR_EM = 0.56;
+const TOC_CHAR_EM = 0.42;
 const LINE_HEIGHT_EM = 1.2;
 const STANZA_GAP_EM = 16 / 28;
 const TOC_GAP_EM = 6 / 20;
@@ -21,7 +23,7 @@ const TITLE_WIDTH = (10 - 0.5 - 1.3 - 0.4) * 72;
 const LYRICS_WIDTH = (10 - 1.0 - 0.4) * 72;
 const LYRICS_HEIGHT = (7.5 - 1.4 - 0.8 - 0.1) * 72;
 const TOC_TITLE_WIDTH = (10 - 1.0 - 0.4) * 72;
-const TOC_COLUMN_WIDTH = ((10 - 1.0 - 0.2) / 2 - 0.4) * 72;
+const TOC_COLUMN_WIDTH = ((10 - 1.0 - 0.2) / 2 - 0.2) * 72; // left inset only
 const TOC_COLUMN_HEIGHT = (7.5 - 1.6 - 1.2) * 72;
 
 const STORAGE_KEY = "songslides:v1";
@@ -63,7 +65,10 @@ const els = {
   clearTemplate: $("clearTemplate"), toc: $("toc"), fontFamily: $("fontFamily"),
   titleSize: $("titleSize"), contentSize: $("contentSize"), fileName: $("fileName"),
   generate: $("generate"), message: $("message"), engine: $("engine"), engineText: $("engineText"),
-  tally: $("tally"), previewBody: $("previewBody"), empty: $("empty"),
+  previewBody: $("previewBody"), empty: $("empty"), backdrop: $("backdrop"), jump: $("jump"),
+  hymnBoard: $("hymnBoard"), songCount: $("songCount"), slideCount: $("slideCount"),
+  templateCard: $("templateCard"), templateSub: $("templateSub"), generateText: $("generateText"),
+  privacy: $("privacy"), more: $("more"),
 };
 
 // --- parsing and fitting (mirrors songslides.py) --------------------------
@@ -115,9 +120,9 @@ function fitFontSize(lines, width, height, size, minSize, gapEm = STANZA_GAP_EM)
   return minSize;
 }
 
-function fitSingleLine(text, width, size, minSize) {
+function fitSingleLine(text, width, size, minSize, em = BOLD_CHAR_EM) {
   for (let s = size; s >= minSize; s--) {
-    if (wrappedLines(text, width, s, BOLD_CHAR_EM) === 1) return s;
+    if (wrappedLines(text, width, s, em) === 1) return s;
   }
   return minSize;
 }
@@ -197,7 +202,10 @@ function tocSlides(songs, style) {
     list.style.setProperty("--pt", size);
     list.style.setProperty("--gap", Math.round(size * TOC_GAP_EM));
     for (const label of labels.slice(page * TOC_PER_SLIDE, (page + 1) * TOC_PER_SLIDE)) {
-      list.append(el("li", null, label));
+      const item = el("li", null, label);
+      item.style.setProperty("--pt", fitSingleLine(label, TOC_COLUMN_WIDTH, size,
+        Math.min(TOC_MIN_SINGLE_LINE_SIZE, size), TOC_CHAR_EM));
+      list.append(item);
     }
     slide.append(slideTitle(heading, fitSingleLine(heading, TOC_TITLE_WIDTH, style.title_size,
       Math.min(MIN_FITTED_TITLE, style.title_size))), list);
@@ -208,8 +216,9 @@ function tocSlides(songs, style) {
   return figures;
 }
 
-function group(title, detail, figures) {
+function group(id, title, detail, figures) {
   const section = el("section", "song");
+  section.id = id;
   const head = el("div", "song-head");
   head.append(el("h3", null, title), el("span", null, detail));
   const grid = el("div", "slides");
@@ -219,6 +228,39 @@ function group(title, detail, figures) {
 }
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const PRIVACY = "Runs in this browser tab. Your songs and template are never uploaded.";
+
+function jumpLink(id, label) {
+  const link = el("a", null, label);
+  link.href = `#${id}`;
+  return link;
+}
+
+function showCounts(songCount, slideCount) {
+  els.songCount.textContent = songCount || "–";
+  els.slideCount.textContent = slideCount || "–";
+  els.hymnBoard.setAttribute("aria-label", songCount
+    ? `${plural(songCount, "song")}, ${plural(slideCount, "slide")}` : "No songs yet");
+  els.privacy.textContent = songCount
+    ? `${plural(songCount, "song")}, ${plural(slideCount, "slide")}. Nothing is uploaded.` : PRIVACY;
+}
+
+// Paint the editor's text behind the transparent textarea, with title lines coloured.
+function renderBackdrop() {
+  const fragment = document.createDocumentFragment();
+  for (const line of els.songs.value.split("\n")) {
+    if (line.startsWith("#")) fragment.append(el("span", "title-line", line));
+    else fragment.append(line);
+    fragment.append("\n");
+  }
+  fragment.append("\u200b"); // keep a trailing empty line as tall as in the textarea
+  els.backdrop.replaceChildren(fragment);
+  syncBackdropScroll();
+}
+
+function syncBackdropScroll() {
+  els.backdrop.scrollTop = els.songs.scrollTop;
+}
 
 function renderPreview() {
   const { songs, ignoredLines } = parseSongs(els.songs.value);
@@ -227,7 +269,9 @@ function renderPreview() {
 
   if (!songs.length) {
     els.previewBody.replaceChildren(els.empty);
-    els.tally.textContent = "";
+    els.jump.replaceChildren();
+    els.jump.hidden = true;
+    showCounts(0, 0);
     if (els.songs.value.trim()) {
       els.previewBody.prepend(el("p", "notice", 'No songs found yet. Start each song with a title line such as "# Amazing Grace".'));
     }
@@ -240,17 +284,24 @@ function renderPreview() {
       `${plural(ignoredLines, "line")} before the first "#" title ${ignoredLines === 1 ? "is" : "are"} left out.`));
   }
   const tocFigures = els.toc.checked ? tocSlides(songs, style) : [];
-  if (tocFigures.length) nodes.push(group("Table of contents", plural(tocFigures.length, "slide"), tocFigures));
+  const links = [];
+  if (tocFigures.length) {
+    nodes.push(group("toc", "Table of contents", plural(tocFigures.length, "slide"), tocFigures));
+    links.push(jumpLink("toc", "Contents"));
+  }
 
   let slideCount = tocFigures.length;
-  for (const song of songs) {
+  songs.forEach((song, index) => {
     const stanzas = song.stanzas.length ? song.stanzas : [[]];
     slideCount += stanzas.length;
     const figures = stanzas.map((lines, i) => songSlide(song.title, lines, i + 1, stanzas.length, style));
-    nodes.push(group(song.title, plural(stanzas.length, "slide"), figures));
-  }
+    nodes.push(group(`song-${index + 1}`, song.title, plural(stanzas.length, "slide"), figures));
+    links.push(jumpLink(`song-${index + 1}`, song.title));
+  });
   els.previewBody.replaceChildren(...nodes);
-  els.tally.textContent = `${plural(songs.length, "song")} · ${plural(slideCount, "slide")}`;
+  els.jump.replaceChildren(...links);
+  els.jump.hidden = false;
+  showCounts(songs.length, slideCount);
   return { songs };
 }
 
@@ -301,6 +352,7 @@ async function openSongFile(file) {
     return;
   }
   els.songs.value = await readSongFile(file);
+  renderBackdrop();
   showMessage("");
   renderPreview();
   saveSettings();
@@ -315,8 +367,10 @@ function setTemplate(file) {
     return;
   }
   templateFile = file || null;
-  els.templateName.textContent = templateFile ? templateFile.name : "No template, plain white slides";
-  els.templateName.classList.toggle("chosen", Boolean(templateFile));
+  els.templateName.textContent = templateFile ? templateFile.name : "Choose a template";
+  els.templateSub.textContent = templateFile
+    ? "Background and logo for every slide" : "Optional .pptx with the church background and logo";
+  els.templateCard.classList.toggle("chosen", Boolean(templateFile));
   els.clearTemplate.hidden = !templateFile;
   if (!file) els.templateFile.value = "";
   showMessage("");
@@ -360,7 +414,7 @@ let nextId = 1;
 
 function setBusy(busy) {
   els.generate.disabled = busy || !engineReady;
-  els.generate.textContent = busy ? "Building slides…" : "Download PowerPoint";
+  els.generateText.textContent = busy ? "Building slides…" : "Download PowerPoint";
 }
 
 worker.onmessage = ({ data }) => {
@@ -417,7 +471,10 @@ els.form.addEventListener("submit", async (event) => {
 
 // --- wiring -----------------------------------------------------------------
 
-els.songs.addEventListener("input", schedulePreview);
+els.songs.addEventListener("input", () => { renderBackdrop(); schedulePreview(); });
+els.songs.addEventListener("scroll", syncBackdropScroll);
+// The textarea is resizable; keep the backdrop's wrapping width in step.
+new ResizeObserver(syncBackdropScroll).observe(els.songs);
 for (const input of [els.toc, els.fontFamily, els.titleSize, els.contentSize]) {
   input.addEventListener("input", schedulePreview);
 }
@@ -428,6 +485,7 @@ els.clearTemplate.addEventListener("click", () => setTemplate(null));
 els.loadExample.addEventListener("click", () => {
   if (els.songs.value.trim() && !window.confirm("Replace the songs in the box with the example?")) return;
   els.songs.value = EXAMPLE;
+  renderBackdrop();
   renderPreview();
   saveSettings();
 });
@@ -450,5 +508,22 @@ els.dropZone.addEventListener("drop", (event) => {
   else openSongFile(file);
 });
 
+// On wide screens the controls card is sticky and scrolls inside itself. Size it to the
+// space actually visible below the header so the pinned download button is always on screen.
+const wideScreen = window.matchMedia("(min-width: 861px)");
+function fitControls() {
+  if (!wideScreen.matches) {
+    els.form.style.maxHeight = "";
+    return;
+  }
+  const top = Math.max(16, els.form.getBoundingClientRect().top);
+  els.form.style.maxHeight = `${window.innerHeight - top - 16}px`;
+}
+window.addEventListener("scroll", fitControls, { passive: true });
+window.addEventListener("resize", fitControls);
+fitControls();
+
+els.more.open = wideScreen.matches;
 restoreSettings();
+renderBackdrop();
 renderPreview();
