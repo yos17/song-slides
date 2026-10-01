@@ -35,6 +35,8 @@ function geometry(w, h) {
 }
 const PLAIN_SLIDE = geometry(10, 7.5); // python-pptx's default 4:3 deck
 
+// Wide screens use an editor layout: the song text and the preview scroll separately.
+const wideScreen = window.matchMedia("(min-width: 861px)");
 const STORAGE_KEY = "songslides:v1";
 // The release version, stamped into index.html by tools/publish.sh as app.js?v=…; passing it
 // on to the worker and songslides.py means a new release is never mixed with cached old files.
@@ -80,31 +82,47 @@ const els = {
   previewBody: $("previewBody"), empty: $("empty"), backdrop: $("backdrop"), jump: $("jump"),
   hymnBoard: $("hymnBoard"), songCount: $("songCount"), slideCount: $("slideCount"),
   templateCard: $("templateCard"), templateSub: $("templateSub"), generateText: $("generateText"),
-  privacy: $("privacy"), more: $("more"), undo: $("undo"), undoText: $("undoText"), undoButton: $("undoButton"),
+  privacy: $("privacy"), more: $("more"), search: $("search"), searchCount: $("searchCount"),
+  searchPrev: $("searchPrev"), searchNext: $("searchNext"), previewHead: document.querySelector(".preview-head"),
+  preview: document.querySelector(".preview"), undo: $("undo"), undoText: $("undoText"), undoButton: $("undoButton"),
 };
 
 // --- parsing and fitting (mirrors songslides.py) --------------------------
 
+// Each song also records where its title (titleRange) and verses (ranges) sit in the text,
+// as [start, end) character offsets, so a preview slide can select its text in the editor.
 function parseSongs(text) {
-  const lines = text.replace(/^﻿/, "").replace(/\r\n?/g, "\n").split("\n");
+  const lines = text.replace(/^\ufeff/, "").replace(/\r\n?/g, "\n").split("\n");
   const songs = [];
   let song = null;
   let stanza = [];
+  let range = null;
   let ignoredLines = 0;
+  let pos = 0;
   const endStanza = () => {
-    if (song && stanza.length) song.stanzas.push(stanza);
+    if (song && stanza.length) {
+      song.stanzas.push(stanza);
+      song.ranges.push(range);
+    }
     stanza = [];
   };
   for (const raw of lines) {
+    const start = pos;
+    pos += raw.length + 1;
     const line = raw.replace(/\s+$/, "");
     if (line.startsWith("#")) {
       endStanza();
       const title = line.replace(/^#+/, "").trim();
-      song = title ? { title, stanzas: [] } : null;
+      song = title ? { title, stanzas: [], ranges: [], titleRange: [start, start + line.length] } : null;
       if (song) songs.push(song);
     } else if (line.trim()) {
-      if (song) stanza.push(line);
-      else ignoredLines += 1;
+      if (!song) {
+        ignoredLines += 1;
+        continue;
+      }
+      if (!stanza.length) range = [start, start];
+      stanza.push(line);
+      range[1] = start + line.length;
     } else {
       endStanza();
     }
@@ -167,6 +185,9 @@ function slideTitle(text, size) {
   return title;
 }
 
+// Song slides in text order, with the text range each one came from.
+let slideMap = [];
+
 // The template's artwork (background, logo, lines) drawn behind every preview slide.
 let templateArt = null; // {svg: SVGElement, urls: [blob URLs], geo}
 
@@ -176,10 +197,11 @@ function newSlide(className) {
   return slide;
 }
 
-function songSlide(title, lines, number, count, style, geo) {
+function songSlide(title, lines, number, count, style, geo, range, from = range[0]) {
   const slide = newSlide("slide");
-  slide.setAttribute("role", "img");
-  slide.setAttribute("aria-label", `${title}, slide ${number} of ${count}`);
+  slide.setAttribute("role", "button");
+  slide.setAttribute("tabindex", "0");
+  slide.setAttribute("aria-label", `Edit ${title}, slide ${number} of ${count}`);
   const titleSize = fitSingleLine(title, geo.titleWidth, style.title_size, Math.min(MIN_FITTED_TITLE, style.title_size));
   slide.append(slideTitle(title, titleSize), el("span", "slide-counter", `${number}/${count}`));
 
@@ -201,8 +223,12 @@ function songSlide(title, lines, number, count, style, geo) {
     note = "No lyrics, so this is a title-only slide";
   }
   const figure = el("figure", "slide-figure");
+  figure.dataset.start = range[0];
+  figure.dataset.end = range[1];
   figure.append(slide);
   if (note) figure.append(el("p", "slide-note", note));
+  // "from": where this slide's text begins; a song's first slide also owns its "# Title" line
+  slideMap.push({ from, start: range[0], end: range[1], figure });
   return figure;
 }
 
@@ -271,13 +297,28 @@ function showCounts(songCount, slideCount) {
     ? `${plural(songCount, "song")}, ${plural(slideCount, "slide")}. Nothing is uploaded.` : PRIVACY;
 }
 
-// Paint the editor's text behind the transparent textarea, with title lines coloured.
+// Paint the editor's text behind the transparent textarea: title lines coloured,
+// search matches marked. The backdrop's text is exactly the textarea's, so offsets match.
 function renderBackdrop() {
   const fragment = document.createDocumentFragment();
+  let pos = 0;
+  let m = 0;
   for (const line of els.songs.value.split("\n")) {
-    if (line.startsWith("#")) fragment.append(el("span", "title-line", line));
-    else fragment.append(line);
+    const holder = line.startsWith("#") ? el("span", "title-line") : fragment;
+    let cursor = 0;
+    while (m < search.matches.length && search.matches[m] < pos + line.length) {
+      const at = search.matches[m] - pos;
+      if (at >= cursor) {
+        holder.append(line.slice(cursor, at));
+        holder.append(el("mark", m === search.current ? "current" : null, line.slice(at, at + search.term.length)));
+        cursor = at + search.term.length;
+      }
+      m += 1;
+    }
+    holder.append(line.slice(cursor));
+    if (holder !== fragment) fragment.append(holder);
     fragment.append("\n");
+    pos += line.length + 1;
   }
   fragment.append("\u200b"); // keep a trailing empty line as tall as in the textarea
   els.backdrop.replaceChildren(fragment);
@@ -286,6 +327,139 @@ function renderBackdrop() {
 
 function syncBackdropScroll() {
   els.backdrop.scrollTop = els.songs.scrollTop;
+}
+
+// --- editor <-> preview -----------------------------------------------------
+
+// Pixel offset of a character in the editor, measured on the backdrop (same layout):
+// drop a zero-width marker at that character and read where it lands.
+function editorY(offset) {
+  const walker = document.createTreeWalker(els.backdrop, NodeFilter.SHOW_TEXT);
+  let seen = 0;
+  let node = walker.nextNode();
+  let last = node;
+  while (node && seen + node.length <= offset) {
+    seen += node.length;
+    last = node;
+    node = walker.nextNode();
+  }
+  const target = node || last;
+  if (!target) return 0;
+  const marker = el("span", null, "\u200b");
+  const range = document.createRange();
+  range.setStart(target, node ? offset - seen : target.length);
+  range.insertNode(marker);
+  const y = marker.offsetTop;
+  const parent = marker.parentNode;
+  marker.remove();
+  parent.normalize();
+  return y;
+}
+
+// Scroll the editor so the given character sits a third of the way down.
+function scrollEditorTo(offset) {
+  els.songs.scrollTop = Math.max(0, editorY(offset) - els.songs.clientHeight / 3);
+  syncBackdropScroll();
+}
+
+function selectInEditor(start, end) {
+  els.songs.focus({ preventScroll: true });
+  els.songs.setSelectionRange(start, end);
+  scrollEditorTo(start);
+}
+
+// The slide the editor is working on, outlined in the preview.
+let currentRange = null;
+
+function markCurrentAt(offset, reveal) {
+  // the last slide whose text (or its song's title line) starts at or before the offset
+  let entry = null;
+  for (const item of slideMap) {
+    if (item.from > offset) break;
+    entry = item;
+  }
+  entry = entry || slideMap[0];
+  for (const figure of els.previewBody.querySelectorAll(".slide-figure.current")) figure.classList.remove("current");
+  if (!entry) return;
+  currentRange = [entry.start, entry.end];
+  entry.figure.classList.add("current");
+  if (reveal) revealSlide(entry.figure);
+}
+
+// Songs far down the preview render lazily (content-visibility), so a scroll to them first
+// lands using estimated heights, and sections drawn a frame later push the target away.
+// Re-align every frame until it has stayed put for a few frames (at most ~half a second).
+function settleOn(target, block) {
+  let previous = null;
+  let stable = 0;
+  let frames = 0;
+  const align = () => {
+    target.scrollIntoView({ block });
+    const top = Math.round(target.getBoundingClientRect().top);
+    stable = top === previous ? stable + 1 : 0;
+    previous = top;
+    if (stable < 4 && ++frames < 30) requestAnimationFrame(align);
+  };
+  align();
+}
+
+// Bring a slide into the visible part of the preview if it is not already fully in view.
+// No smooth gliding: a glide past lazily drawn songs, or one started mid-glide, ends up off.
+function revealSlide(figure) {
+  // the preview scrolls on its own on wide screens, with the page on narrow ones
+  const top = els.previewHead.getBoundingClientRect().bottom;
+  const bottom = wideScreen.matches ? els.preview.getBoundingClientRect().bottom : window.innerHeight;
+  const box = figure.getBoundingClientRect();
+  if (box.top >= top && box.bottom <= bottom) return;
+  settleOn(figure, "center");
+}
+
+let caretTimer = 0;
+function followCaret() {
+  clearTimeout(caretTimer);
+  caretTimer = setTimeout(() => {
+    if (document.activeElement === els.songs) markCurrentAt(els.songs.selectionStart, true);
+  }, 120);
+}
+
+// --- search -----------------------------------------------------------------
+
+const search = { term: "", matches: [], current: -1 };
+
+function findMatches(keepNear) {
+  const term = els.search.value;
+  search.term = term;
+  search.matches = [];
+  if (term) {
+    const haystack = els.songs.value.toLowerCase();
+    const needle = term.toLowerCase();
+    for (let at = haystack.indexOf(needle); at !== -1 && search.matches.length < 5000;
+      at = haystack.indexOf(needle, at + needle.length)) {
+      search.matches.push(at);
+    }
+  }
+  const near = search.matches.findIndex((at) => at >= keepNear);
+  search.current = search.matches.length ? (near === -1 ? 0 : near) : -1;
+}
+
+function showSearch(move) {
+  const count = search.matches.length;
+  els.searchCount.textContent = !search.term ? "" : count ? `${search.current + 1} of ${count}` : "No matches";
+  els.searchCount.classList.toggle("none", Boolean(search.term) && !count);
+  els.searchPrev.disabled = els.searchNext.disabled = count < 2;
+  renderBackdrop();
+  if (move && count) {
+    const at = search.matches[search.current];
+    scrollEditorTo(at);
+    els.songs.setSelectionRange(at, at + search.term.length);
+    markCurrentAt(at, true);
+  }
+}
+
+function stepSearch(delta) {
+  if (!search.matches.length) return;
+  search.current = (search.current + delta + search.matches.length) % search.matches.length;
+  showSearch(true);
 }
 
 function renderPreview() {
@@ -299,6 +473,7 @@ function renderPreview() {
   els.previewBody.style.setProperty("--slide-link", templateArt?.link || "#0000FF");
 
   if (!songs.length) {
+    slideMap = [];
     els.previewBody.replaceChildren(els.empty);
     els.jump.replaceChildren();
     els.jump.hidden = true;
@@ -322,10 +497,13 @@ function renderPreview() {
   }
 
   let slideCount = tocFigures.length;
+  slideMap = [];
   songs.forEach((song, index) => {
     const stanzas = song.stanzas.length ? song.stanzas : [[]];
+    const ranges = song.stanzas.length ? song.ranges : [song.titleRange];
     slideCount += stanzas.length;
-    const figures = stanzas.map((lines, i) => songSlide(song.title, lines, i + 1, stanzas.length, style, geo));
+    const figures = stanzas.map((lines, i) =>
+      songSlide(song.title, lines, i + 1, stanzas.length, style, geo, ranges[i], i === 0 ? song.titleRange[0] : ranges[i][0]));
     nodes.push(group(`song-${index + 1}`, song.title, plural(stanzas.length, "slide"), figures));
     links.push(jumpLink(`song-${index + 1}`, song.title));
   });
@@ -333,6 +511,7 @@ function renderPreview() {
   els.jump.replaceChildren(...links);
   els.jump.hidden = false;
   showCounts(songs.length, slideCount);
+  if (currentRange) markCurrentAt(currentRange[0], false);
   return { songs };
 }
 
@@ -379,10 +558,21 @@ async function readSongFile(file) {
 // Replacing the songs never asks first: it happens at once and can be undone.
 let undoText = null;
 
+// After the whole text changes, re-run an open search; otherwise just repaint.
+function refreshEditor() {
+  if (search.term) {
+    findMatches(0);
+    showSearch(false);
+  } else {
+    renderBackdrop();
+  }
+}
+
 function replaceSongs(text, what) {
   const previous = els.songs.value;
   els.songs.value = text;
-  renderBackdrop();
+  currentRange = null;
+  refreshEditor();
   renderPreview();
   saveSettings();
   if (previous.trim() && previous !== text) {
@@ -599,7 +789,58 @@ els.form.addEventListener("submit", async (event) => {
 
 // --- wiring -----------------------------------------------------------------
 
-els.songs.addEventListener("input", () => { hideUndo(); renderBackdrop(); schedulePreview(); });
+els.songs.addEventListener("input", () => {
+  hideUndo();
+  if (search.term) findMatches(els.songs.selectionStart);
+  if (search.term) showSearch(false);
+  else renderBackdrop();
+  schedulePreview();
+  followCaret();
+});
+els.songs.addEventListener("click", followCaret);
+els.songs.addEventListener("keyup", (event) => {
+  if (event.key.startsWith("Arrow") || event.key.startsWith("Page") || event.key === "Home" || event.key === "End") followCaret();
+});
+els.songs.addEventListener("keydown", (event) => {
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f") {
+    event.preventDefault();
+    els.search.focus();
+    els.search.select();
+  }
+});
+
+// Search: type to find, Enter / Shift+Enter or the arrows to step, Esc to close.
+els.search.addEventListener("input", () => {
+  findMatches(els.songs.selectionStart);
+  showSearch(true);
+});
+els.search.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    stepSearch(event.shiftKey ? -1 : 1);
+  } else if (event.key === "Escape") {
+    const at = search.matches[search.current];
+    els.search.value = "";
+    findMatches(0);
+    showSearch(false);
+    if (at !== undefined) selectInEditor(at, at);
+  }
+});
+els.searchNext.addEventListener("click", () => stepSearch(1));
+els.searchPrev.addEventListener("click", () => stepSearch(-1));
+
+// Click (or Enter on) a song slide in the preview to select its verse in the editor.
+function editSlide(event) {
+  const figure = event.target.closest(".slide-figure[data-start]");
+  if (!figure || event.target.closest("a")) return;
+  if (event.type === "keydown" && event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  const start = Number(figure.dataset.start);
+  selectInEditor(start, Number(figure.dataset.end));
+  markCurrentAt(start, false);
+}
+els.previewBody.addEventListener("click", editSlide);
+els.previewBody.addEventListener("keydown", editSlide);
 els.songs.addEventListener("scroll", syncBackdropScroll);
 // The textarea is resizable; keep the backdrop's wrapping width in step.
 new ResizeObserver(syncBackdropScroll).observe(els.songs);
@@ -618,32 +859,20 @@ els.undoButton.addEventListener("click", () => {
   const text = undoText;
   hideUndo();
   els.songs.value = text;
-  renderBackdrop();
+  refreshEditor();
   renderPreview();
   saveSettings();
   els.songs.focus();
 });
 
-// Songs far down the preview render lazily (content-visibility), so a jump first lands
-// using estimated heights, and sections drawn a frame later can push the target away again.
-// Re-align every frame until it has stayed put for a few frames (at most ~half a second).
+// Jump-bar and table-of-contents links: scroll to the song and settle there.
 document.addEventListener("click", (event) => {
   const link = event.target.closest('a[href^="#song-"], a[href="#contents"]');
   const target = link && document.getElementById(link.getAttribute("href").slice(1));
   if (!target) return;
   event.preventDefault();
   history.replaceState(null, "", link.getAttribute("href"));
-  let previous = null;
-  let stable = 0;
-  let frames = 0;
-  const align = () => {
-    target.scrollIntoView({ block: "start" });
-    const top = Math.round(target.getBoundingClientRect().top);
-    stable = top === previous ? stable + 1 : 0;
-    previous = top;
-    if (stable < 4 && ++frames < 30) requestAnimationFrame(align);
-  };
-  align();
+  settleOn(target, "start");
 });
 
 for (const type of ["dragenter", "dragover"]) {
@@ -664,22 +893,7 @@ els.dropZone.addEventListener("drop", (event) => {
   else openSongFile(file);
 });
 
-// On wide screens the controls card is sticky and scrolls inside itself. Size it to the
-// space actually visible below the header so the pinned download button is always on screen.
-const wideScreen = window.matchMedia("(min-width: 861px)");
-function fitControls() {
-  if (!wideScreen.matches) {
-    els.form.style.maxHeight = "";
-    return;
-  }
-  const top = Math.max(16, els.form.getBoundingClientRect().top);
-  els.form.style.maxHeight = `${window.innerHeight - top - 16}px`;
-}
-window.addEventListener("scroll", fitControls, { passive: true });
-window.addEventListener("resize", fitControls);
-fitControls();
 
-els.more.open = wideScreen.matches;
 restoreSettings();
 renderBackdrop();
 renderPreview();

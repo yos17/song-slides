@@ -30,9 +30,20 @@
 
   <main class="workspace">
     <form class="controls" id="form" novalidate>
-      <section class="field">
+      <section class="field songs-field">
         <div class="field-head">
           <label for="songs" class="label">Songs</label>
+          <div class="search" role="search">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+            <input type="search" id="search" placeholder="Search" aria-label="Search the song text" autocomplete="off" spellcheck="false">
+            <span class="search-count" id="searchCount" aria-live="polite"></span>
+            <button type="button" class="search-step" id="searchPrev" aria-label="Previous match" disabled>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg>
+            </button>
+            <button type="button" class="search-step" id="searchNext" aria-label="Next match" disabled>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+            </button>
+          </div>
           <div class="field-actions">
             <label class="link-button" for="songFile">Open file</label>
             <input type="file" id="songFile" hidden
@@ -50,11 +61,11 @@
           <span id="undoText"></span>
           <button type="button" class="link-button" id="undoButton">Undo</button>
         </p>
-        <p class="hint">Start each song with <code class="title-code"># Title</code>. A blank line starts the next slide. You can also open a Word file (.docx); its song titles are found automatically.</p>
+        <p class="hint"><code class="title-code"># Title</code> starts a song, a blank line starts the next slide. Click a slide to edit its text.</p>
       </section>
 
       <section class="field">
-        <span class="label" id="templateLabel">Template</span>
+        <span class="label visually-hidden" id="templateLabel">Template</span>
         <div class="template-card" id="templateCard">
           <label class="template-pick" for="templateFile">
             <svg class="template-icon" width="28" height="22" viewBox="0 0 28 22" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="1" y="1" width="26" height="20" rx="2"/><path d="M1 5h26M5 17h18"/></svg>
@@ -72,7 +83,7 @@
         <input type="checkbox" id="toc" checked>
         <span class="check-text">
           <span>Start with a table of contents</span>
-          <span class="hint">Each title links to the song's first slide.</span>
+          <span class="hint toc-hint">Each title links to the song's first slide.</span>
         </span>
       </label>
 
