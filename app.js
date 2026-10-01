@@ -77,7 +77,7 @@ const els = {
   previewBody: $("previewBody"), empty: $("empty"), backdrop: $("backdrop"), jump: $("jump"),
   hymnBoard: $("hymnBoard"), songCount: $("songCount"), slideCount: $("slideCount"),
   templateCard: $("templateCard"), templateSub: $("templateSub"), generateText: $("generateText"),
-  privacy: $("privacy"), more: $("more"),
+  privacy: $("privacy"), more: $("more"), undo: $("undo"), undoText: $("undoText"), undoButton: $("undoButton"),
 };
 
 // --- parsing and fitting (mirrors songslides.py) --------------------------
@@ -373,17 +373,37 @@ async function readSongFile(file) {
   }
 }
 
+// Replacing the songs never asks first: it happens at once and can be undone.
+let undoText = null;
+
+function replaceSongs(text, what) {
+  const previous = els.songs.value;
+  els.songs.value = text;
+  renderBackdrop();
+  renderPreview();
+  saveSettings();
+  if (previous.trim() && previous !== text) {
+    undoText = previous;
+    els.undoText.textContent = `${what} replaced your songs.`;
+    els.undo.hidden = false;
+  } else {
+    hideUndo();
+  }
+}
+
+function hideUndo() {
+  undoText = null;
+  els.undo.hidden = true;
+}
+
 async function openSongFile(file) {
   if (!file) return;
   if (!/\.txt$/i.test(file.name) && file.type !== "text/plain") {
     showMessage(`"${file.name}" isn't a .txt file. Save the songs as plain text and open that file.`, "error");
     return;
   }
-  els.songs.value = await readSongFile(file);
-  renderBackdrop();
   showMessage("");
-  renderPreview();
-  saveSettings();
+  replaceSongs(await readSongFile(file), `"${file.name}"`);
 }
 
 let templateFile = null;
@@ -546,7 +566,7 @@ els.form.addEventListener("submit", async (event) => {
 
 // --- wiring -----------------------------------------------------------------
 
-els.songs.addEventListener("input", () => { renderBackdrop(); schedulePreview(); });
+els.songs.addEventListener("input", () => { hideUndo(); renderBackdrop(); schedulePreview(); });
 els.songs.addEventListener("scroll", syncBackdropScroll);
 // The textarea is resizable; keep the backdrop's wrapping width in step.
 new ResizeObserver(syncBackdropScroll).observe(els.songs);
@@ -558,11 +578,17 @@ els.songFile.addEventListener("change", () => { openSongFile(els.songFile.files[
 els.templateFile.addEventListener("change", () => setTemplate(els.templateFile.files[0]));
 els.clearTemplate.addEventListener("click", () => setTemplate(null));
 els.loadExample.addEventListener("click", () => {
-  if (els.songs.value.trim() && !window.confirm("Replace the songs in the box with the example?")) return;
-  els.songs.value = EXAMPLE;
+  replaceSongs(EXAMPLE, "The example");
+});
+els.undoButton.addEventListener("click", () => {
+  if (undoText === null) return;
+  const text = undoText;
+  hideUndo();
+  els.songs.value = text;
   renderBackdrop();
   renderPreview();
   saveSettings();
+  els.songs.focus();
 });
 
 for (const type of ["dragenter", "dragover"]) {
