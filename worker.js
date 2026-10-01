@@ -7,6 +7,7 @@
 const PYODIDE_VERSION = "0.29.5"; // the 314.x line fails to load in some current browsers
 const PYODIDE_URL = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/`;
 const PYTHON_PPTX = "python-pptx==1.0.2";
+const VERSION = new URL(self.location.href).searchParams.get("v") || "dev";
 
 importScripts(`${PYODIDE_URL}pyodide.js`);
 
@@ -18,7 +19,7 @@ const ready = (async () => {
   status("Loading the PowerPoint library…");
   await pyodide.loadPackage(["micropip", "lxml", "pillow", "typing-extensions"]);
   await pyodide.pyimport("micropip").install(PYTHON_PPTX);
-  const source = await fetch("songslides.py", { cache: "no-cache" }).then((r) => {
+  const source = await fetch(`songslides.py?v=${VERSION}`, { cache: "no-cache" }).then((r) => {
     if (!r.ok) throw new Error(`Could not load songslides.py (${r.status})`);
     return r.text();
   });

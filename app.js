@@ -36,6 +36,9 @@ function geometry(w, h) {
 const PLAIN_SLIDE = geometry(10, 7.5); // python-pptx's default 4:3 deck
 
 const STORAGE_KEY = "songslides:v1";
+// The release version, stamped into index.html by tools/publish.sh as app.js?v=…; passing it
+// on to the worker and songslides.py means a new release is never mixed with cached old files.
+const VERSION = new URL(document.currentScript.src).searchParams.get("v") || "dev";
 
 const EXAMPLE = `# Amazing Grace
 
@@ -490,7 +493,7 @@ function setEngine(state, text) {
   els.engineText.textContent = text;
 }
 
-const worker = new Worker("worker.js");
+const worker = new Worker(`worker.js?v=${VERSION}`);
 let engineReady = false;
 let pending = null; // {id, name, usedTemplate}
 let nextId = 1;
