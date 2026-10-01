@@ -594,6 +594,27 @@ els.undoButton.addEventListener("click", () => {
   els.songs.focus();
 });
 
+// Songs far down the preview render lazily (content-visibility), so a jump first lands
+// using estimated heights. Re-align on the next frames until the target stops moving.
+document.addEventListener("click", (event) => {
+  const link = event.target.closest('a[href^="#song-"], a[href="#toc"]');
+  const target = link && document.getElementById(link.getAttribute("href").slice(1));
+  if (!target) return;
+  event.preventDefault();
+  history.replaceState(null, "", link.getAttribute("href"));
+  let previous = null;
+  let frames = 0;
+  const align = () => {
+    target.scrollIntoView({ block: "start" });
+    const top = target.getBoundingClientRect().top;
+    if (top !== previous && ++frames < 10) {
+      previous = top;
+      requestAnimationFrame(align);
+    }
+  };
+  align();
+});
+
 for (const type of ["dragenter", "dragover"]) {
   els.dropZone.addEventListener(type, (event) => {
     if (![...event.dataTransfer.types].includes("Files")) return;
