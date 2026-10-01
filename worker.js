@@ -1,8 +1,10 @@
 // Runs songslides.py inside Pyodide, off the main thread so the page stays responsive.
 // Messages in:  {type: "generate", id, text, template (ArrayBuffer|null), toc, style}
+//               {type: "word", id, document (ArrayBuffer)}         -> the .docx as "# Title" text
 //               {type: "template", id, template (ArrayBuffer)}  -> the template's artwork as SVG
 // Messages out: {type: "status", text} | {type: "ready"} | {type: "result", id, bytes, summary}
-//               | {type: "template", id, art: {width_in, height_in, svg}} | {type: "error", id?, kind?, message}
+//               | {type: "template", id, art: {width_in, height_in, svg}} | {type: "word", id, text}
+//               | {type: "error", id?, kind?, message}
 
 const PYODIDE_VERSION = "0.29.5"; // the 314.x line fails to load in some current browsers
 const PYODIDE_URL = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/`;
@@ -37,6 +39,9 @@ def run(text, template_path, toc, font_family, title_size, content_size):
         f.write(data)
     return json.dumps(summary.to_dict())
 
+def word(path):
+    return songslides.docx_to_text(open(path, "rb").read())
+
 def preview(template_path):
     return json.dumps(songslides.template_preview(open(template_path, "rb").read()))
 `);
@@ -66,9 +71,22 @@ async function templateArt(pyodide, data) {
   }
 }
 
+async function wordText(pyodide, data) {
+  try {
+    pyodide.FS.writeFile("/tmp/songs.docx", new Uint8Array(data.document));
+    const word = pyodide.globals.get("word");
+    const text = word("/tmp/songs.docx");
+    word.destroy();
+    postMessage({ type: "word", id: data.id, text });
+  } catch (err) {
+    postMessage({ type: "error", id: data.id, kind: "word", message: pythonMessage(err) });
+  }
+}
+
 onmessage = async ({ data }) => {
   const pyodide = await ready;
   if (data.type === "template") return templateArt(pyodide, data);
+  if (data.type === "word") return wordText(pyodide, data);
   if (data.type !== "generate") return;
   try {
     let templatePath = null;

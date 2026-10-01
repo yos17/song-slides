@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import math
+import re
 from dataclasses import dataclass, field
 
 from pptx import Presentation
@@ -726,3 +727,162 @@ def template_preview(template=None) -> dict:
     link = "#" + colors.scheme.get("hlink", "0000FF")
     return {"width_in": round(Emu(width).inches, 4), "height_in": round(Emu(height).inches, 4),
             "svg": svg, "link": link}
+
+
+# --- Word import --------------------------------------------------------------
+#
+# Song collections often live in Word documents, where a title is just a bold line
+# and "line breaks" are sometimes long runs of spaces. docx_to_text() turns such a
+# document into the "# Title" text format. It is a best guess, so the result goes
+# into the editor for a person to check.
+
+_W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+_LABEL = re.compile(r"^(reff?\b|ref\.|refrain|chorus|coda|bridge|brid\.|interlude|verse|bait|intro|ending|"
+                    r"\(?\d+x\)?$|\d+[.)]$)", re.I)
+_MAX_TITLE = 70
+
+
+def _on(el):
+    return el is not None and el.get(f"{_W}val", "true") not in ("0", "false", "none")
+
+
+def _word_styles(z):
+    """styleId -> (is_heading, is_bold), following basedOn chains."""
+    from lxml import etree
+    if "word/styles.xml" not in z.namelist():
+        return {}
+    raw = {}
+    for style in etree.fromstring(z.read("word/styles.xml")).iter(f"{_W}style"):
+        name_el = style.find(f"{_W}name")
+        name = name_el.get(f"{_W}val", "") if name_el is not None else ""
+        based = style.find(f"{_W}basedOn")
+        outline = style.find(f"{_W}pPr/{_W}outlineLvl")
+        raw[style.get(f"{_W}styleId")] = {
+            "heading": bool(re.match(r"(heading|title|judul|überschrift|titel)", name, re.I)) or outline is not None,
+            "bold": _on(style.find(f"{_W}rPr/{_W}b")) if style.find(f"{_W}rPr/{_W}b") is not None else None,
+            "based": based.get(f"{_W}val") if based is not None else None,
+        }
+
+    def resolve(sid, seen=()):
+        s = raw.get(sid)
+        if s is None or sid in seen:
+            return False, False
+        heading, bold = s["heading"], s["bold"]
+        if s["based"] and (bold is None or not heading):
+            parent_heading, parent_bold = resolve(s["based"], seen + (sid,))
+            heading = heading or parent_heading
+            bold = parent_bold if bold is None else bold
+        return heading, bool(bold)
+    return {sid: resolve(sid) for sid in raw}
+
+
+def _visual_lines(text):
+    """Split a paragraph line that was 'wrapped' with runs of spaces or tabs."""
+    pieces = [p for p in re.split(r" {4,}|\t{2,}", text.strip(" \t")) if p.strip()] or [""]
+    merged = []
+    for piece in pieces:
+        piece = re.sub(r"\s+", " ", piece).strip()
+        if merged and (len(piece) < 8 or _LABEL.match(piece)) and not _LABEL.match(merged[-1]):
+            merged[-1] += " " + piece          # "...leer.      Ref."  /  "...bagiMu      (2x)"
+        elif merged and _LABEL.match(merged[-1]) and len(merged[-1]) < 8:
+            merged[-1] += " " + piece          # "Ref.:      Von guten Mächten..."
+        else:
+            merged.append(piece)
+    return merged
+
+
+def _docx_lines(data):
+    """The document as lines: (text, bold, heading), with "" for blank lines."""
+    import zipfile
+    from lxml import etree
+    try:
+        z = zipfile.ZipFile(io.BytesIO(data))
+        root = etree.fromstring(z.read("word/document.xml"))
+    except (zipfile.BadZipFile, KeyError) as e:
+        raise ValueError("This is not a Word .docx file. Save it from Word as .docx and try again.") from e
+    styles = _word_styles(z)
+    body = root.find(f"{_W}body")
+    lines = []
+    for p in (body.iter(f"{_W}p") if body is not None else []):
+        p_style = p.find(f"{_W}pPr/{_W}pStyle")
+        heading, style_bold = styles.get(p_style.get(f"{_W}val"), (False, False)) if p_style is not None else (False, False)
+        text, bold_chars, chars = [], 0, 0
+
+        def flush():
+            for piece in _visual_lines("".join(text)):
+                lines.append((piece, chars > 0 and bold_chars == chars, heading))
+
+        for node in p.iter():
+            tag = node.tag.rsplit("}", 1)[-1] if isinstance(node.tag, str) else ""
+            if tag == "t":
+                run_props = node.getparent().find(f"{_W}rPr")
+                bold_el = run_props.find(f"{_W}b") if run_props is not None else None
+                bold = _on(bold_el) if bold_el is not None else style_bold
+                count = len((node.text or "").strip())
+                chars += count
+                bold_chars += count if bold else 0
+                text.append(node.text or "")
+            elif tag == "tab":
+                text.append("\t")
+            elif tag == "noBreakHyphen":
+                text.append("-")
+            elif tag in ("br", "cr"):
+                flush()
+                text, bold_chars, chars = [], 0, 0
+        flush()
+    return lines
+
+
+def docx_to_text(data: bytes) -> str:
+    """Convert a Word (.docx) song collection to "# Title" text. Best effort: check the result."""
+    items, blank, block = [], 0, -1      # one entry per non-blank line
+    for text, bold, heading in _docx_lines(data):
+        if not text:
+            blank += 1
+            continue
+        if not items or blank:
+            block += 1
+        items.append({"text": text, "bold": bold, "heading": heading,
+                      "gap": blank if items else 99, "block": block})
+        blank = 0
+    for i, it in enumerate(items):
+        it["first"] = i == 0 or items[i - 1]["block"] != it["block"]
+        it["last"] = i == len(items) - 1 or items[i + 1]["block"] != it["block"]
+
+    def lines_after(i):
+        """Lyric lines that follow: the rest of this block, or else the whole next block."""
+        j = i + 1
+        group = items[j]["block"] if j < len(items) else None
+        return sum(1 for it in items[j:] if it["block"] == group)
+
+    def could_be_title(t):
+        return (len(t) <= _MAX_TITLE and not _LABEL.match(t) and not re.search(r"[.,;:]$", t)
+                and re.search(r"[^\W\d_]", t))
+
+    titles = set()
+    for i, it in enumerate(items):
+        # Word heading styles and "#" lines are titles; documents often mix them with bold lines.
+        if it["text"].startswith("#") or (it["heading"] and len(it["text"]) <= _MAX_TITLE):
+            titles.add(i)
+            continue
+        if not could_be_title(it["text"]) or lines_after(i) < 2:
+            continue
+        prev_bold = not it["first"] and items[i - 1]["bold"]
+        next_bold = not it["last"] and items[i + 1]["bold"]
+        if it["first"] and it["last"] and (it["bold"] or it["gap"] >= 2):
+            titles.add(i)            # a line on its own: bold, or after a song gap
+        elif it["first"] and it["bold"] and not next_bold and it["gap"] >= 1:
+            titles.add(i)            # bold title glued to its first verse
+        elif not it["first"] and it["bold"] and not prev_bold and not next_bold:
+            titles.add(i)            # bold title glued to the end of the previous song
+
+    out = []
+    for i, it in enumerate(items):
+        if i in titles:
+            out += ["", f"# {it['text'].lstrip('#').strip()}", ""]
+        else:
+            starts_verse = it["first"] and i - 1 not in titles
+            if starts_verse and out and out[-1] != "":
+                out.append("")
+            out.append(it["text"])
+    return "\n".join(out).strip("\n") + "\n"

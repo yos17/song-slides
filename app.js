@@ -399,14 +399,38 @@ function hideUndo() {
   els.undo.hidden = true;
 }
 
+// Word files are converted by songslides.docx_to_text in the worker; the result lands in
+// the editor (with Undo) so titles can be checked in the preview before downloading.
+let wordRequest = null;
+
 async function openSongFile(file) {
   if (!file) return;
+  if (/\.docx$/i.test(file.name)) {
+    wordRequest = { id: `word-${nextId++}`, name: file.name };
+    showMessage(engineReady ? `Reading "${file.name}"…` : `"${file.name}" opens when the generator is ready…`);
+    worker.postMessage({ type: "word", id: wordRequest.id, document: await file.arrayBuffer() });
+    return;
+  }
+  if (/\.doc$/i.test(file.name)) {
+    showMessage(`"${file.name}" is an old Word file. In Word, use File › Save As › Word Document (.docx), then open that.`, "error");
+    return;
+  }
   if (!/\.txt$/i.test(file.name) && file.type !== "text/plain") {
-    showMessage(`"${file.name}" isn't a .txt file. Save the songs as plain text and open that file.`, "error");
+    showMessage(`"${file.name}" can't be opened. Use a .txt or Word .docx file.`, "error");
     return;
   }
   showMessage("");
   replaceSongs(await readSongFile(file), `"${file.name}"`);
+}
+
+function useWordText(text) {
+  const { name } = wordRequest;
+  wordRequest = null;
+  replaceSongs(text, `"${name}"`);
+  const count = parseSongs(text).songs.length;
+  showMessage(count
+    ? `Converted "${name}": ${plural(count, "song")} found. Check the titles in the preview.`
+    : `No songs found in "${name}". Add "# " in front of each song title in the box.`, count ? "done" : "error");
 }
 
 let templateFile = null;
@@ -523,6 +547,12 @@ worker.onmessage = ({ data }) => {
     } catch {
       showMessage("The preview can't draw this template's design, but the download still uses it.", "error");
     }
+  } else if (data.type === "word") {
+    if (wordRequest && data.id === wordRequest.id) useWordText(data.text);
+  } else if (data.type === "error" && data.kind === "word") {
+    if (!wordRequest || data.id !== wordRequest.id) return;
+    wordRequest = null;
+    showMessage(data.message, "error");
   } else if (data.type === "error" && data.kind === "template") {
     if (data.id !== templateRequest) return;
     showMessage(/zip|package|content type/i.test(data.message)

@@ -34,8 +34,9 @@
         <div class="field-head">
           <label for="songs" class="label">Songs</label>
           <div class="field-actions">
-            <label class="link-button" for="songFile">Open .txt file</label>
-            <input type="file" id="songFile" accept=".txt,text/plain" hidden>
+            <label class="link-button" for="songFile">Open file</label>
+            <input type="file" id="songFile" hidden
+              accept=".txt,.docx,.doc,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword">
             <button type="button" class="link-button" id="loadExample">Use example</button>
           </div>
         </div>
@@ -49,7 +50,7 @@
           <span id="undoText"></span>
           <button type="button" class="link-button" id="undoButton">Undo</button>
         </p>
-        <p class="hint">Start each song with <code class="title-code"># Title</code>. A blank line starts the next slide.</p>
+        <p class="hint">Start each song with <code class="title-code"># Title</code>. A blank line starts the next slide. You can also open a Word file (.docx); its song titles are found automatically.</p>
       </section>
 
       <section class="field">
