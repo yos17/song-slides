@@ -1,7 +1,8 @@
 // Runs songslides.py inside Pyodide, off the main thread so the page stays responsive.
 // Messages in:  {type: "generate", id, text, template (ArrayBuffer|null), toc, style}
+//               {type: "template", id, template (ArrayBuffer)}  -> the template's artwork as SVG
 // Messages out: {type: "status", text} | {type: "ready"} | {type: "result", id, bytes, summary}
-//               | {type: "error", id?, message}
+//               | {type: "template", id, art: {width_in, height_in, svg}} | {type: "error", id?, kind?, message}
 
 const PYODIDE_VERSION = "0.29.5"; // the 314.x line fails to load in some current browsers
 const PYODIDE_URL = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/`;
@@ -34,6 +35,9 @@ def run(text, template_path, toc, font_family, title_size, content_size):
     with open("/tmp/out.pptx", "wb") as f:
         f.write(data)
     return json.dumps(summary.to_dict())
+
+def preview(template_path):
+    return json.dumps(songslides.template_preview(open(template_path, "rb").read()))
 `);
   return pyodide;
 })();
@@ -49,9 +53,22 @@ function pythonMessage(err) {
   return lines[lines.length - 1].replace(/^\w+Error: /, "");
 }
 
+async function templateArt(pyodide, data) {
+  try {
+    pyodide.FS.writeFile("/tmp/preview.pptx", new Uint8Array(data.template));
+    const preview = pyodide.globals.get("preview");
+    const art = JSON.parse(preview("/tmp/preview.pptx"));
+    preview.destroy();
+    postMessage({ type: "template", id: data.id, art });
+  } catch (err) {
+    postMessage({ type: "error", id: data.id, kind: "template", message: pythonMessage(err) });
+  }
+}
+
 onmessage = async ({ data }) => {
-  if (data.type !== "generate") return;
   const pyodide = await ready;
+  if (data.type === "template") return templateArt(pyodide, data);
+  if (data.type !== "generate") return;
   try {
     let templatePath = null;
     if (data.template) {

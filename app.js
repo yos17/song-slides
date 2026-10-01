@@ -18,13 +18,22 @@ const TOC_CHAR_EM = 0.42;
 const LINE_HEIGHT_EM = 1.2;
 const STANZA_GAP_EM = 16 / 28;
 const TOC_GAP_EM = 6 / 20;
-// Text areas on a 10 x 7.5 in slide, in points (see the geometry constants in songslides.py).
-const TITLE_WIDTH = (10 - 0.5 - 1.3 - 0.4) * 72;
-const LYRICS_WIDTH = (10 - 1.0 - 0.4) * 72;
-const LYRICS_HEIGHT = (7.5 - 1.4 - 0.8 - 0.1) * 72;
-const TOC_TITLE_WIDTH = (10 - 1.0 - 0.4) * 72;
-const TOC_COLUMN_WIDTH = ((10 - 1.0 - 0.2) / 2 - 0.2) * 72; // left inset only
-const TOC_COLUMN_HEIGHT = (7.5 - 1.6 - 1.2) * 72;
+// Free fonts with the same character widths, used when the real font is not installed.
+const METRIC_TWINS = { Calibri: "Carlito", Arial: "Arimo", "Times New Roman": "Tinos", Georgia: "Gelasio" };
+
+// Text areas in points for a slide of w x h inches (see the geometry constants in songslides.py).
+function geometry(w, h) {
+  return {
+    w, h,
+    titleWidth: (w - 0.5 - 1.3 - 0.4) * 72,
+    lyricsWidth: (w - 1.0 - 0.4) * 72,
+    lyricsHeight: (h - 1.4 - 0.8 - 0.1) * 72,
+    tocTitleWidth: (w - 1.0 - 0.4) * 72,
+    tocColumnWidth: ((w - 1.0 - 0.2) / 2 - 0.2) * 72, // left inset only
+    tocColumnHeight: (h - 1.6 - 1.2) * 72,
+  };
+}
+const PLAIN_SLIDE = geometry(10, 7.5); // python-pptx's default 4:3 deck
 
 const STORAGE_KEY = "songslides:v1";
 
@@ -155,23 +164,32 @@ function slideTitle(text, size) {
   return title;
 }
 
-function songSlide(title, lines, number, count, style) {
-  const slide = el("div", "slide");
+// The template's artwork (background, logo, lines) drawn behind every preview slide.
+let templateArt = null; // {svg: SVGElement, urls: [blob URLs], geo}
+
+function newSlide(className) {
+  const slide = el("div", className);
+  if (templateArt) slide.append(templateArt.svg.cloneNode(true));
+  return slide;
+}
+
+function songSlide(title, lines, number, count, style, geo) {
+  const slide = newSlide("slide");
   slide.setAttribute("role", "img");
   slide.setAttribute("aria-label", `${title}, slide ${number} of ${count}`);
-  const titleSize = fitSingleLine(title, TITLE_WIDTH, style.title_size, Math.min(MIN_FITTED_TITLE, style.title_size));
+  const titleSize = fitSingleLine(title, geo.titleWidth, style.title_size, Math.min(MIN_FITTED_TITLE, style.title_size));
   slide.append(slideTitle(title, titleSize), el("span", "slide-counter", `${number}/${count}`));
 
   let note = null;
   if (lines.length) {
     const minSize = Math.min(MIN_FITTED_CONTENT, style.content_size);
-    const size = fitFontSize(lines, LYRICS_WIDTH, LYRICS_HEIGHT, style.content_size, minSize);
+    const size = fitFontSize(lines, geo.lyricsWidth, geo.lyricsHeight, style.content_size, minSize);
     const list = el("ul", "slide-lyrics");
     list.style.setProperty("--pt", size);
     list.style.setProperty("--gap", Math.round(size * STANZA_GAP_EM));
     for (const line of lines) list.append(el("li", null, line));
     slide.append(list);
-    if (textHeight(lines, LYRICS_WIDTH, size, STANZA_GAP_EM) > LYRICS_HEIGHT) {
+    if (textHeight(lines, geo.lyricsWidth, size, STANZA_GAP_EM) > geo.lyricsHeight) {
       note = "Too long to fit. Split this verse with a blank line.";
     } else if (size < style.content_size) {
       note = `Lyrics reduced to ${size} pt to fit`;
@@ -185,29 +203,34 @@ function songSlide(title, lines, number, count, style) {
   return figure;
 }
 
-function tocSlides(songs, style) {
+function tocSlides(songs, style, geo) {
   const labels = songs.map((song, i) => `${String(i + 1).padStart(2, " ")}. ${song.title}`);
   const columns = [];
   for (let i = 0; i < labels.length; i += TOC_PER_COLUMN) columns.push(labels.slice(i, i + TOC_PER_COLUMN));
   const size = Math.min(...columns.map((c) =>
-    fitFontSize(c, TOC_COLUMN_WIDTH, TOC_COLUMN_HEIGHT, TOC_ENTRY_SIZE, TOC_MIN_ENTRY_SIZE, TOC_GAP_EM)));
+    fitFontSize(c, geo.tocColumnWidth, geo.tocColumnHeight, TOC_ENTRY_SIZE, TOC_MIN_ENTRY_SIZE, TOC_GAP_EM)));
   const pages = Math.ceil(labels.length / TOC_PER_SLIDE);
   const figures = [];
   for (let page = 0; page < pages; page++) {
     const heading = "Table of Contents" + (pages > 1 ? ` (${page + 1}/${pages})` : "");
-    const slide = el("div", "slide toc");
-    slide.setAttribute("role", "img");
+    const slide = newSlide("slide toc");
+    slide.setAttribute("role", "group");
     slide.setAttribute("aria-label", heading);
     const list = el("ol", "slide-toc");
     list.style.setProperty("--pt", size);
     list.style.setProperty("--gap", Math.round(size * TOC_GAP_EM));
-    for (const label of labels.slice(page * TOC_PER_SLIDE, (page + 1) * TOC_PER_SLIDE)) {
-      const item = el("li", null, label);
-      item.style.setProperty("--pt", fitSingleLine(label, TOC_COLUMN_WIDTH, size,
+    const first = page * TOC_PER_SLIDE;
+    labels.slice(first, first + TOC_PER_SLIDE).forEach((label, i) => {
+      // like the deck's TOC, each entry jumps to its song
+      const link = el("a", null, label);
+      link.href = `#song-${first + i + 1}`;
+      const item = el("li");
+      item.style.setProperty("--pt", fitSingleLine(label, geo.tocColumnWidth, size,
         Math.min(TOC_MIN_SINGLE_LINE_SIZE, size), TOC_CHAR_EM));
+      item.append(link);
       list.append(item);
-    }
-    slide.append(slideTitle(heading, fitSingleLine(heading, TOC_TITLE_WIDTH, style.title_size,
+    });
+    slide.append(slideTitle(heading, fitSingleLine(heading, geo.tocTitleWidth, style.title_size,
       Math.min(MIN_FITTED_TITLE, style.title_size))), list);
     const figure = el("figure", "slide-figure");
     figure.append(slide);
@@ -265,7 +288,12 @@ function syncBackdropScroll() {
 function renderPreview() {
   const { songs, ignoredLines } = parseSongs(els.songs.value);
   const style = currentStyle();
-  els.previewBody.style.setProperty("--font", `"${style.font_family}", Carlito, "Segoe UI", sans-serif`);
+  const geo = templateArt ? templateArt.geo : PLAIN_SLIDE;
+  const twin = METRIC_TWINS[style.font_family];
+  els.previewBody.style.setProperty("--font", `"${style.font_family}", ${twin ? `"${twin}", ` : ""}sans-serif`);
+  els.previewBody.style.setProperty("--slide-w", geo.w);
+  els.previewBody.style.setProperty("--slide-ratio", `${geo.w} / ${geo.h}`);
+  els.previewBody.style.setProperty("--slide-link", templateArt?.link || "#0000FF");
 
   if (!songs.length) {
     els.previewBody.replaceChildren(els.empty);
@@ -283,7 +311,7 @@ function renderPreview() {
     nodes.push(el("p", "notice",
       `${plural(ignoredLines, "line")} before the first "#" title ${ignoredLines === 1 ? "is" : "are"} left out.`));
   }
-  const tocFigures = els.toc.checked ? tocSlides(songs, style) : [];
+  const tocFigures = els.toc.checked ? tocSlides(songs, style, geo) : [];
   const links = [];
   if (tocFigures.length) {
     nodes.push(group("toc", "Table of contents", plural(tocFigures.length, "slide"), tocFigures));
@@ -294,7 +322,7 @@ function renderPreview() {
   songs.forEach((song, index) => {
     const stanzas = song.stanzas.length ? song.stanzas : [[]];
     slideCount += stanzas.length;
-    const figures = stanzas.map((lines, i) => songSlide(song.title, lines, i + 1, stanzas.length, style));
+    const figures = stanzas.map((lines, i) => songSlide(song.title, lines, i + 1, stanzas.length, style, geo));
     nodes.push(group(`song-${index + 1}`, song.title, plural(stanzas.length, "slide"), figures));
     links.push(jumpLink(`song-${index + 1}`, song.title));
   });
@@ -374,6 +402,41 @@ function setTemplate(file) {
   els.clearTemplate.hidden = !templateFile;
   if (!file) els.templateFile.value = "";
   showMessage("");
+  requestTemplateArt(templateFile);
+}
+
+// Ask the generator to draw the template's artwork; the preview redraws when it arrives.
+let templateRequest = null;
+
+function requestTemplateArt(file) {
+  if (templateArt) templateArt.urls.forEach((url) => URL.revokeObjectURL(url));
+  templateArt = null;
+  templateRequest = file ? `template-${nextId++}` : null;
+  renderPreview();
+  if (!file) return;
+  const id = templateRequest;
+  file.arrayBuffer().then((buffer) => worker.postMessage({ type: "template", id, template: buffer }, [buffer]));
+}
+
+function useTemplateArt(art) {
+  const svg = new DOMParser().parseFromString(art.svg, "image/svg+xml").documentElement;
+  if (svg.nodeName !== "svg") throw new Error("not an SVG");
+  // Swap the embedded pictures for blob URLs so the many slide copies share one image.
+  const urls = [];
+  for (const image of svg.querySelectorAll("image")) {
+    const match = /^data:([^;,]+);base64,(.*)$/.exec(image.getAttribute("href") || "");
+    if (!match) { image.remove(); continue; }
+    const bytes = Uint8Array.from(atob(match[2]), (c) => c.charCodeAt(0));
+    const url = URL.createObjectURL(new Blob([bytes], { type: match[1] }));
+    image.setAttribute("href", url);
+    urls.push(url);
+  }
+  svg.setAttribute("class", "slide-art");
+  svg.setAttribute("aria-hidden", "true");
+  templateArt = {
+    svg: document.importNode(svg, true), urls, link: art.link, geo: geometry(art.width_in, art.height_in),
+  };
+  renderPreview();
 }
 
 function outputName() {
@@ -430,6 +493,18 @@ worker.onmessage = ({ data }) => {
     showMessage(`Downloaded ${pending.name}: ${plural(s.total, "slide")} from ${plural(s.songs, "song")}.`, "done");
     pending = null;
     setBusy(false);
+  } else if (data.type === "template") {
+    if (data.id !== templateRequest) return; // a newer template was chosen meanwhile
+    try {
+      useTemplateArt(data.art);
+    } catch {
+      showMessage("The preview can't draw this template's design, but the download still uses it.", "error");
+    }
+  } else if (data.type === "error" && data.kind === "template") {
+    if (data.id !== templateRequest) return;
+    showMessage(/zip|package|content type/i.test(data.message)
+      ? "That template couldn't be opened. Save it from PowerPoint as .pptx and choose it again."
+      : "The preview can't draw this template's design, but the download still uses it.", "error");
   } else if (data.type === "error") {
     if (data.id === undefined) {
       setEngine("error", "Generator unavailable");

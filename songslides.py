@@ -359,3 +359,370 @@ def generate_pptx(text, template_bytes=None, *, toc=False, style=None):
     out = io.BytesIO()
     prs.save(out)
     return out.getvalue(), summary
+
+
+# --- template preview (browser) ------------------------------------------------
+#
+# The browser preview has no PowerPoint renderer, so we draw the template's own
+# artwork (background, master and layout shapes) as SVG and lay the slide text on
+# top. This covers what church templates use: fills, pictures, lines, rectangles,
+# ellipses, custom paths, groups and simple text. Placeholders are skipped because
+# the generator never fills them.
+
+_A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+_P = "{http://schemas.openxmlformats.org/presentationml/2006/main}"
+_R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+EMU_PER_PT = 12700
+WEB_IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/svg+xml", "image/webp", "image/bmp"}
+# Free fonts with the same character widths, used when the real font is not installed.
+METRIC_TWINS = {"Calibri": "Carlito", "Arial": "Arimo", "Times New Roman": "Tinos", "Georgia": "Gelasio"}
+
+
+def _local(el) -> str:
+    return el.tag.rsplit("}", 1)[-1] if isinstance(el.tag, str) else ""
+
+
+def _font_stack(face: str) -> str:
+    twin = METRIC_TWINS.get(face)
+    return ", ".join([f"'{face}'"] + ([f"'{twin}'"] if twin else []) + ["sans-serif"])
+
+
+class _Colors:
+    """Resolves DrawingML colours (srgb, scheme, sys, preset + lum/tint/shade/alpha)."""
+
+    PRESET = {"black": "000000", "white": "FFFFFF", "red": "FF0000", "green": "008000", "blue": "0000FF"}
+
+    def __init__(self, master):
+        from lxml import etree
+        self.scheme, self.minor_font = {}, "Calibri"
+        theme = master.part.part_related_by(RT.THEME)
+        root = etree.fromstring(theme.blob)
+        clr_scheme = root.find(f".//{_A}clrScheme")
+        if clr_scheme is not None:
+            for slot in clr_scheme:
+                value = slot[0] if len(slot) else None
+                if value is not None:
+                    self.scheme[_local(slot)] = value.get("val") if _local(value) == "srgbClr" else value.get("lastClr")
+        minor = root.find(f".//{_A}minorFont/{_A}latin")
+        if minor is not None and minor.get("typeface"):
+            self.minor_font = minor.get("typeface")
+        clr_map = master._element.find(f"{_P}clrMap")
+        self.map = dict(clr_map.attrib) if clr_map is not None else {}
+
+    def font(self, face):
+        if not face or face.startswith("+mn") or face.startswith("+mj"):
+            return self.minor_font
+        return face
+
+    def of(self, parent):
+        """Colour of the first colour child of `parent`: ("#RRGGBB", opacity) or None."""
+        if parent is None:
+            return None
+        for el in parent:
+            kind = _local(el)
+            if kind == "srgbClr":
+                hex_ = el.get("val")
+            elif kind == "schemeClr":
+                name = el.get("val")
+                hex_ = self.scheme.get(self.map.get(name, name)) or self.scheme.get(name)
+            elif kind == "sysClr":
+                hex_ = el.get("lastClr") or ("000000" if el.get("val") == "windowText" else "FFFFFF")
+            elif kind == "prstClr":
+                hex_ = self.PRESET.get(el.get("val"), "000000")
+            else:
+                continue
+            return self._modify(hex_ or "000000", el)
+        return None
+
+    @staticmethod
+    def _modify(hex_, el):
+        import colorsys
+        r, g, b = (int(hex_[i:i + 2], 16) / 255 for i in (0, 2, 4))
+        alpha = 1.0
+        for mod in el:
+            kind, val = _local(mod), int(mod.get("val", "100000")) / 100000
+            if kind in ("lumMod", "lumOff"):
+                h, l, s = colorsys.rgb_to_hls(r, g, b)
+                l = min(1, max(0, l * val if kind == "lumMod" else l + val))
+                r, g, b = colorsys.hls_to_rgb(h, l, s)
+            elif kind == "shade":
+                r, g, b = r * val, g * val, b * val
+            elif kind == "tint":
+                r, g, b = (c + (1 - c) * (1 - val) for c in (r, g, b))
+            elif kind == "alpha":
+                alpha = val
+        return "#" + "".join(f"{round(c * 255):02X}" for c in (r, g, b)), alpha
+
+
+def _paint(attr, colour):
+    if colour is None:
+        return f'{attr}="none"'
+    hex_, alpha = colour
+    return f'{attr}="{hex_}"' + (f' {attr}-opacity="{alpha:g}"' if alpha < 1 else "")
+
+
+def _fill_of(sp_pr, style, colors):
+    if sp_pr is not None:
+        for el in sp_pr:
+            kind = _local(el)
+            if kind == "noFill":
+                return None
+            if kind == "solidFill":
+                return colors.of(el)
+            if kind == "gradFill":
+                stop = el.find(f"{_A}gsLst/{_A}gs")
+                return colors.of(stop)
+    ref = style.find(f"{_A}fillRef") if style is not None else None
+    if ref is not None and ref.get("idx", "0") != "0":
+        return colors.of(ref)
+    return None
+
+
+def _line_of(sp_pr, style, colors):
+    ln = sp_pr.find(f"{_A}ln") if sp_pr is not None else None
+    width = int(ln.get("w", "9525")) if ln is not None else 9525
+    if ln is not None:
+        if ln.find(f"{_A}noFill") is not None:
+            return None, 0
+        solid = ln.find(f"{_A}solidFill")
+        if solid is not None:
+            return colors.of(solid), width
+    ref = style.find(f"{_A}lnRef") if style is not None else None
+    if ref is not None and ref.get("idx", "0") != "0":
+        return colors.of(ref), width
+    return None, 0
+
+
+def _xfrm(sp_pr):
+    xfrm = sp_pr.find(f"{_A}xfrm") if sp_pr is not None else None
+    if xfrm is None or xfrm.find(f"{_A}off") is None:
+        return None
+    off, ext = xfrm.find(f"{_A}off"), xfrm.find(f"{_A}ext")
+    return {
+        "x": int(off.get("x")), "y": int(off.get("y")),
+        "cx": int(ext.get("cx")), "cy": int(ext.get("cy")),
+        "rot": int(xfrm.get("rot", "0")) / 60000,
+        "flipH": xfrm.get("flipH") in ("1", "true"), "flipV": xfrm.get("flipV") in ("1", "true"),
+        "el": xfrm,
+    }
+
+
+def _transform(box):
+    cx, cy = box["x"] + box["cx"] / 2, box["y"] + box["cy"] / 2
+    parts = []
+    if box["rot"]:
+        parts.append(f"rotate({box['rot']:g} {cx:.0f} {cy:.0f})")
+    if box["flipH"] or box["flipV"]:
+        sx, sy = (-1 if box["flipH"] else 1), (-1 if box["flipV"] else 1)
+        parts.append(f"translate({cx:.0f} {cy:.0f}) scale({sx} {sy}) translate({-cx:.0f} {-cy:.0f})")
+    return f' transform="{" ".join(parts)}"' if parts else ""
+
+
+def _path_data(cust_geom, box):
+    out = []
+    for path in cust_geom.iter(f"{_A}path"):
+        w = int(path.get("w", box["cx"]) or box["cx"]) or 1
+        h = int(path.get("h", box["cy"]) or box["cy"]) or 1
+        sx, sy = box["cx"] / w, box["cy"] / h
+        point = lambda pt: f"{box['x'] + int(pt.get('x')) * sx:.0f} {box['y'] + int(pt.get('y')) * sy:.0f}"
+        d = []
+        for cmd in path:
+            kind, pts = _local(cmd), cmd.findall(f"{_A}pt")
+            if kind == "moveTo":
+                d.append("M " + point(pts[0]))
+            elif kind == "lnTo":
+                d.append("L " + point(pts[0]))
+            elif kind == "cubicBezTo":
+                d.append("C " + ", ".join(point(p) for p in pts))
+            elif kind == "quadBezTo":
+                d.append("Q " + ", ".join(point(p) for p in pts))
+            elif kind == "close":
+                d.append("Z")
+        out.append((" ".join(d), path.get("fill") != "none", path.get("stroke") not in ("0", "false")))
+    return out
+
+
+def _text_svg(sp, box, colors, master_default_size):
+    from xml.sax.saxutils import escape
+    tx_body = sp.find(f"{_P}txBody")
+    if tx_body is None:
+        return ""
+    body = tx_body.find(f"{_A}bodyPr")
+    lst = tx_body.find(f"{_A}lstStyle/{_A}lvl1pPr")
+    lst_rpr = lst.find(f"{_A}defRPr") if lst is not None else None
+    ins = lambda name, default: int(body.get(name, default)) if body is not None else default
+    left, top, right, bottom = ins("lIns", 91440), ins("tIns", 45720), ins("rIns", 91440), ins("bIns", 45720)
+
+    lines = []
+    for p in tx_body.findall(f"{_A}p"):
+        runs = [r for r in p if _local(r) in ("r", "fld")]
+        text = "".join(r.findtext(f"{_A}t") or "" for r in runs)
+        if not text.strip():
+            continue
+        rpr = runs[0].find(f"{_A}rPr")
+        pick = lambda attr, default=None: (rpr.get(attr) if rpr is not None and rpr.get(attr) else
+                                           lst_rpr.get(attr) if lst_rpr is not None and lst_rpr.get(attr) else default)
+        size = int(pick("sz", master_default_size)) / 100
+        bold = pick("b", "0") in ("1", "true")
+        colour = (colors.of(rpr.find(f"{_A}solidFill")) if rpr is not None and rpr.find(f"{_A}solidFill") is not None
+                  else colors.of(lst_rpr.find(f"{_A}solidFill")) if lst_rpr is not None and lst_rpr.find(f"{_A}solidFill") is not None
+                  else colors.of(_default_text_colour()))
+        latin = (rpr.find(f"{_A}latin") if rpr is not None else None)
+        if latin is None and lst_rpr is not None:
+            latin = lst_rpr.find(f"{_A}latin")
+        face = colors.font(latin.get("typeface") if latin is not None else None)
+        ppr = p.find(f"{_A}pPr")
+        align = (ppr.get("algn") if ppr is not None and ppr.get("algn") else
+                 lst.get("algn") if lst is not None and lst.get("algn") else "l")
+        lines.append((text, size, bold, colour, face, align))
+    if not lines:
+        return ""
+
+    line_heights = [size * EMU_PER_PT * 1.2 for _, size, *_ in lines]
+    anchor = body.get("anchor", "t") if body is not None else "t"
+    y = box["y"] + top
+    room = box["cy"] - top - bottom
+    if anchor == "ctr":
+        y += (room - sum(line_heights)) / 2
+    elif anchor == "b":
+        y += room - sum(line_heights)
+    out = []
+    for (text, size, bold, colour, face, align), height in zip(lines, line_heights):
+        x, text_anchor = box["x"] + left, "start"
+        if align == "ctr":
+            x, text_anchor = box["x"] + box["cx"] / 2, "middle"
+        elif align == "r":
+            x, text_anchor = box["x"] + box["cx"] - right, "end"
+        baseline = y + size * EMU_PER_PT * 0.95
+        # sized in points and scaled up: browsers cap font-size, and EMU sizes run past it
+        out.append(f'<text transform="translate({x:.0f} {baseline:.0f}) scale({EMU_PER_PT})" font-size="{size:g}" '
+                   f'font-family="{_font_stack(face)}" font-weight="{700 if bold else 400}" '
+                   f'text-anchor="{text_anchor}" {_paint("fill", colour)}>{escape(text)}</text>')
+        y += height
+    return "".join(out)
+
+
+def _default_text_colour():
+    """A fill holding <a:schemeClr val="tx1"/>: the theme's default text colour."""
+    from lxml import etree
+    holder = etree.Element(f"{_A}solidFill")
+    etree.SubElement(holder, f"{_A}schemeClr", val="tx1")
+    return holder
+
+
+def _shapes_svg(sp_tree, part, colors, master_default_size):
+    import base64
+    out = []
+    for el in sp_tree:
+        kind = _local(el)
+        if kind not in ("sp", "pic", "cxnSp", "grpSp"):
+            continue
+        if el.find(f".//{_P}nvPr/{_P}ph") is not None and kind != "grpSp":
+            continue  # placeholder: the generator never fills these
+        sp_pr = el.find(f"{_P}spPr") if kind != "grpSp" else el.find(f"{_P}grpSpPr")
+        box = _xfrm(sp_pr)
+        if box is None:
+            continue
+        if kind == "grpSp":
+            ch_off, ch_ext = box["el"].find(f"{_A}chOff"), box["el"].find(f"{_A}chExt")
+            sx = box["cx"] / (int(ch_ext.get("cx")) or 1) if ch_ext is not None else 1
+            sy = box["cy"] / (int(ch_ext.get("cy")) or 1) if ch_ext is not None else 1
+            ox, oy = (int(ch_off.get("x")), int(ch_off.get("y"))) if ch_off is not None else (0, 0)
+            inner = _shapes_svg(el, part, colors, master_default_size)
+            out.append(f'<g{_transform(box)}><g transform="translate({box["x"]:.0f} {box["y"]:.0f}) '
+                       f'scale({sx:g} {sy:g}) translate({-ox:.0f} {-oy:.0f})">{inner}</g></g>')
+            continue
+        if kind == "pic":
+            blip = el.find(f".//{_A}blip")
+            rid = blip.get(f"{_R}embed") if blip is not None else None
+            if not rid:
+                continue
+            image = part.related_part(rid)
+            if image.content_type not in WEB_IMAGE_TYPES:
+                continue
+            data = base64.b64encode(image.blob).decode("ascii")
+            out.append(f'<image x="{box["x"]}" y="{box["y"]}" width="{box["cx"]}" height="{box["cy"]}" '
+                       f'preserveAspectRatio="none" href="data:{image.content_type};base64,{data}"'
+                       f'{_transform(box)}/>')
+            continue
+
+        style = el.find(f"{_P}style")
+        fill = _fill_of(sp_pr, style, colors)
+        stroke, width = _line_of(sp_pr, style, colors)
+        no_stroke = 'stroke="none"'
+        stroke_attrs = f'{_paint("stroke", stroke)} stroke-width="{width}"' if stroke else no_stroke
+        prst = sp_pr.find(f"{_A}prstGeom")
+        cust = sp_pr.find(f"{_A}custGeom")
+        geometry = prst.get("prst") if prst is not None else None
+        x, y, cx, cy = box["x"], box["y"], box["cx"], box["cy"]
+        if kind == "cxnSp" or geometry in ("line", "straightConnector1"):
+            x1, x2 = (x + cx, x) if box["flipH"] else (x, x + cx)
+            y1, y2 = (y + cy, y) if box["flipV"] else (y, y + cy)
+            if stroke:
+                rotate = f' transform="rotate({box["rot"]:g} {x + cx / 2:.0f} {y + cy / 2:.0f})"' if box["rot"] else ""
+                out.append(f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" {stroke_attrs}{rotate}/>')
+        elif cust is not None:
+            for d, can_fill, can_stroke in _path_data(cust, box):
+                out.append(f'<path d="{d}" {_paint("fill", fill if can_fill else None)} '
+                           f'{stroke_attrs if can_stroke else no_stroke}{_transform(box)}/>')
+        elif fill or stroke:
+            if geometry == "ellipse":
+                out.append(f'<ellipse cx="{x + cx / 2:.0f}" cy="{y + cy / 2:.0f}" rx="{cx / 2:.0f}" ry="{cy / 2:.0f}" '
+                           f'{_paint("fill", fill)} {stroke_attrs}{_transform(box)}/>')
+            else:
+                radius = min(cx, cy) * 0.1667 if geometry == "roundRect" else 0
+                out.append(f'<rect x="{x}" y="{y}" width="{cx}" height="{cy}" rx="{radius:.0f}" '
+                           f'{_paint("fill", fill)} {stroke_attrs}{_transform(box)}/>')
+        out.append(_text_svg(el, box, colors, master_default_size))
+    return "".join(out)
+
+
+def _background_svg(holder, part, colors, width, height):
+    import base64
+    bg = holder._element.find(f"{_P}cSld/{_P}bg") if holder is not None else None
+    if bg is None:
+        return None
+    bg_pr, bg_ref = bg.find(f"{_P}bgPr"), bg.find(f"{_P}bgRef")
+    if bg_pr is not None:
+        blip = bg_pr.find(f".//{_A}blip")
+        if blip is not None and blip.get(f"{_R}embed"):
+            image = part.related_part(blip.get(f"{_R}embed"))
+            if image.content_type in WEB_IMAGE_TYPES:
+                data = base64.b64encode(image.blob).decode("ascii")
+                return (f'<image x="0" y="0" width="{width}" height="{height}" preserveAspectRatio="none" '
+                        f'href="data:{image.content_type};base64,{data}"/>')
+        colour = _fill_of(bg_pr, None, colors)
+    else:
+        colour = colors.of(bg_ref)
+    return f'<rect x="0" y="0" width="{width}" height="{height}" {_paint("fill", colour)}/>' if colour else None
+
+
+def template_preview(template=None) -> dict:
+    """Draw the template's artwork as SVG for the browser preview.
+
+    `template` is .pptx bytes, a path, a file-like object or None. Returns
+    {"width_in", "height_in", "svg"}; the SVG's user units are EMU.
+    """
+    if isinstance(template, (bytes, bytearray)):
+        template = io.BytesIO(template)
+    prs = Presentation(template)
+    layout = _pick_layout(prs)
+    master = layout.slide_master
+    colors = _Colors(master)
+    width, height = prs.slide_width, prs.slide_height
+
+    other = master._element.find(f"{_P}txStyles/{_P}otherStyle/{_A}lvl1pPr/{_A}defRPr")
+    default_size = int(other.get("sz")) if other is not None and other.get("sz") else 1800
+
+    layers = [_background_svg(layout, layout.part, colors, width, height)
+              or _background_svg(master, master.part, colors, width, height)
+              or f'<rect x="0" y="0" width="{width}" height="{height}" fill="#FFFFFF"/>']
+    if layout._element.get("showMasterSp") not in ("0", "false"):
+        layers.append(_shapes_svg(master._element.find(f"{_P}cSld/{_P}spTree"), master.part, colors, default_size))
+    layers.append(_shapes_svg(layout._element.find(f"{_P}cSld/{_P}spTree"), layout.part, colors, default_size))
+    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
+           f'preserveAspectRatio="none">{"".join(layers)}</svg>')
+    # PowerPoint and LibreOffice colour hyperlinks with the theme's hlink colour, not the run's.
+    link = "#" + colors.scheme.get("hlink", "0000FF")
+    return {"width_in": round(Emu(width).inches, 4), "height_in": round(Emu(height).inches, 4),
+            "svg": svg, "link": link}
