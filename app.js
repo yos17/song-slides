@@ -317,8 +317,8 @@ function renderPreview() {
   const tocFigures = els.toc.checked ? tocSlides(songs, style, geo) : [];
   const links = [];
   if (tocFigures.length) {
-    nodes.push(group("toc", "Table of contents", plural(tocFigures.length, "slide"), tocFigures));
-    links.push(jumpLink("toc", "Contents"));
+    nodes.push(group("contents", "Table of contents", plural(tocFigures.length, "slide"), tocFigures));
+    links.push(jumpLink("contents", "Contents"));
   }
 
   let slideCount = tocFigures.length;
@@ -598,7 +598,7 @@ els.undoButton.addEventListener("click", () => {
 // using estimated heights, and sections drawn a frame later can push the target away again.
 // Re-align every frame until it has stayed put for a few frames (at most ~half a second).
 document.addEventListener("click", (event) => {
-  const link = event.target.closest('a[href^="#song-"], a[href="#toc"]');
+  const link = event.target.closest('a[href^="#song-"], a[href="#contents"]');
   const target = link && document.getElementById(link.getAttribute("href").slice(1));
   if (!target) return;
   event.preventDefault();
