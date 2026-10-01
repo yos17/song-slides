@@ -462,6 +462,39 @@ function stepSearch(delta) {
   showSearch(true);
 }
 
+// The preview is patched, not rebuilt: a song whose text and settings are unchanged keeps its
+// elements. Songs off-screen render lazily (content-visibility) and only a drawn element knows
+// its real height, so rebuilding everything on each keystroke made the view jump to another song.
+const previewKeys = new WeakMap();
+let templateVersion = 0;
+
+// Bring the container's children in line with `items` ({key, build, reuse}), touching only what changed.
+function patchChildren(container, items) {
+  const old = [...container.children];
+  let i = 0;
+  items.forEach((item, n) => {
+    const current = old[i];
+    if (current && previewKeys.get(current) === item.key) {             // unchanged
+      item.reuse?.(current);
+      i += 1;
+      return;
+    }
+    if (old[i + 1] && previewKeys.get(old[i + 1]) === item.key) {       // the one before it was removed
+      current.remove();
+      item.reuse?.(old[i + 1]);
+      i += 2;
+      return;
+    }
+    const node = item.build();
+    previewKeys.set(node, item.key);
+    const next = items[n + 1];
+    if (current && next && previewKeys.get(current) === next.key) container.insertBefore(node, current);  // inserted
+    else if (current) { current.replaceWith(node); i += 1; }                                              // edited
+    else container.append(node);
+  });
+  for (const extra of old.slice(i)) extra.remove();
+}
+
 function renderPreview() {
   const { songs, ignoredLines } = parseSongs(els.songs.value);
   const style = currentStyle();
@@ -484,41 +517,67 @@ function renderPreview() {
     return { songs };
   }
 
-  const nodes = [];
+  // everything that changes how a slide looks, apart from its own text
+  const look = JSON.stringify([style, templateVersion]);
+  const items = [];
   if (ignoredLines) {
-    nodes.push(el("p", "notice",
-      `${plural(ignoredLines, "line")} before the first "#" title ${ignoredLines === 1 ? "is" : "are"} left out.`));
+    const text = `${plural(ignoredLines, "line")} before the first "#" title ${ignoredLines === 1 ? "is" : "are"} left out.`;
+    items.push({ key: `notice|${text}`, build: () => el("p", "notice", text) });
   }
-  const tocFigures = els.toc.checked ? tocSlides(songs, style, geo) : [];
   const links = [];
-  if (tocFigures.length) {
-    nodes.push(group("contents", "Table of contents", plural(tocFigures.length, "slide"), tocFigures));
+  let slideCount = 0;
+  if (els.toc.checked) {
+    const pages = Math.ceil(songs.length / TOC_PER_SLIDE);
+    slideCount += pages;
+    items.push({
+      key: JSON.stringify(["toc", look, songs.map((song) => song.title)]),
+      build: () => group("contents", "Table of contents", plural(pages, "slide"), tocSlides(songs, style, geo)),
+    });
     links.push(jumpLink("contents", "Contents"));
   }
 
-  let slideCount = tocFigures.length;
   slideMap = [];
   songs.forEach((song, index) => {
+    const id = `song-${index + 1}`;
     const stanzas = song.stanzas.length ? song.stanzas : [[]];
     const ranges = song.stanzas.length ? song.ranges : [song.titleRange];
+    const from = (i) => (i === 0 ? song.titleRange[0] : ranges[i][0]);
     slideCount += stanzas.length;
-    const figures = stanzas.map((lines, i) =>
-      songSlide(song.title, lines, i + 1, stanzas.length, style, geo, ranges[i], i === 0 ? song.titleRange[0] : ranges[i][0]));
-    nodes.push(group(`song-${index + 1}`, song.title, plural(stanzas.length, "slide"), figures));
-    links.push(jumpLink(`song-${index + 1}`, song.title));
+    items.push({
+      key: JSON.stringify([look, song.title, stanzas]),
+      build: () => group(id, song.title, plural(stanzas.length, "slide"),
+        stanzas.map((lines, i) => songSlide(song.title, lines, i + 1, stanzas.length, style, geo, ranges[i], from(i)))),
+      // same slides, but the text around them may have moved: refresh ids and text ranges
+      reuse: (section) => {
+        section.id = id;
+        section.querySelectorAll(".slide-figure").forEach((figure, i) => {
+          figure.dataset.start = ranges[i][0];
+          figure.dataset.end = ranges[i][1];
+          slideMap.push({ from: from(i), start: ranges[i][0], end: ranges[i][1], figure });
+        });
+      },
+    });
+    links.push(jumpLink(id, song.title));
   });
-  els.previewBody.replaceChildren(...nodes);
+  if (els.previewBody.firstElementChild === els.empty) els.previewBody.replaceChildren();
+  patchChildren(els.previewBody, items);
   els.jump.replaceChildren(...links);
   els.jump.hidden = false;
   showCounts(songs.length, slideCount);
-  if (currentRange) markCurrentAt(currentRange[0], false);
+  // keep the outline on the slide being edited (text offsets may have shifted)
+  const caret = document.activeElement === els.songs ? els.songs.selectionStart : currentRange?.[0];
+  if (caret !== undefined) markCurrentAt(caret, false);
   return { songs };
 }
 
 let renderTimer = 0;
 function schedulePreview() {
   clearTimeout(renderTimer);
-  renderTimer = setTimeout(() => { renderPreview(); saveSettings(); }, 150);
+  renderTimer = setTimeout(() => {
+    renderPreview();
+    saveSettings();
+    if (document.activeElement === els.songs) markCurrentAt(els.songs.selectionStart, true);
+  }, 150);
 }
 
 // --- settings that survive a reload (this browser only) ---------------------
@@ -648,6 +707,7 @@ let templateRequest = null;
 function requestTemplateArt(file) {
   if (templateArt) templateArt.urls.forEach((url) => URL.revokeObjectURL(url));
   templateArt = null;
+  templateVersion += 1;
   templateRequest = file ? `template-${nextId++}` : null;
   renderPreview();
   if (!file) return;
@@ -673,6 +733,7 @@ function useTemplateArt(art) {
   templateArt = {
     svg: document.importNode(svg, true), urls, link: art.link, geo: geometry(art.width_in, art.height_in),
   };
+  templateVersion += 1;
   renderPreview();
 }
 
@@ -795,7 +856,6 @@ els.songs.addEventListener("input", () => {
   if (search.term) showSearch(false);
   else renderBackdrop();
   schedulePreview();
-  followCaret();
 });
 els.songs.addEventListener("click", followCaret);
 els.songs.addEventListener("keyup", (event) => {
