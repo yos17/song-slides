@@ -595,7 +595,8 @@ els.undoButton.addEventListener("click", () => {
 });
 
 // Songs far down the preview render lazily (content-visibility), so a jump first lands
-// using estimated heights. Re-align on the next frames until the target stops moving.
+// using estimated heights, and sections drawn a frame later can push the target away again.
+// Re-align every frame until it has stayed put for a few frames (at most ~half a second).
 document.addEventListener("click", (event) => {
   const link = event.target.closest('a[href^="#song-"], a[href="#toc"]');
   const target = link && document.getElementById(link.getAttribute("href").slice(1));
@@ -603,14 +604,14 @@ document.addEventListener("click", (event) => {
   event.preventDefault();
   history.replaceState(null, "", link.getAttribute("href"));
   let previous = null;
+  let stable = 0;
   let frames = 0;
   const align = () => {
     target.scrollIntoView({ block: "start" });
-    const top = target.getBoundingClientRect().top;
-    if (top !== previous && ++frames < 10) {
-      previous = top;
-      requestAnimationFrame(align);
-    }
+    const top = Math.round(target.getBoundingClientRect().top);
+    stable = top === previous ? stable + 1 : 0;
+    previous = top;
+    if (stable < 4 && ++frames < 30) requestAnimationFrame(align);
   };
   align();
 });
