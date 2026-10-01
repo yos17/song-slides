@@ -128,7 +128,7 @@ code { font-family: var(--mono); font-size: 0.9em; }
 .controls > * { flex-shrink: 0; }
 .controls > .songs-field { flex: 1 1 auto; min-height: 300px; }
 .songs-field .editor { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
-.field-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.field-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px 12px; }
 .field-actions { display: flex; gap: 16px; }
 .label { display: block; padding: 0; font-weight: 600; font-size: 13px; letter-spacing: 0.02em; }
 .hint { margin: 0; font-size: 13px; color: var(--muted); }
@@ -168,7 +168,7 @@ code { font-family: var(--mono); font-size: 0.9em; }
 
 .search {
   display: flex; align-items: center; gap: 2px;
-  flex: 1 1 auto; max-width: 320px; min-width: 0;
+  flex: 1 1 180px; min-width: 0;
   padding: 0 4px 0 10px;
   color: var(--muted);
   background: var(--field);

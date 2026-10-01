@@ -82,7 +82,7 @@ const els = {
   previewBody: $("previewBody"), empty: $("empty"), backdrop: $("backdrop"), jump: $("jump"),
   hymnBoard: $("hymnBoard"), songCount: $("songCount"), slideCount: $("slideCount"),
   templateCard: $("templateCard"), templateSub: $("templateSub"), generateText: $("generateText"),
-  privacy: $("privacy"), more: $("more"), search: $("search"), searchCount: $("searchCount"),
+  privacy: $("privacy"), more: $("more"), saveText: $("saveText"), search: $("search"), searchCount: $("searchCount"),
   searchPrev: $("searchPrev"), searchNext: $("searchNext"), previewHead: document.querySelector(".preview-head"),
   preview: document.querySelector(".preview"), undo: $("undo"), undoText: $("undoText"), undoButton: $("undoButton"),
 };
@@ -586,7 +586,7 @@ function saveSettings() {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
       text: els.songs.value, toc: els.toc.checked, font: els.fontFamily.value,
-      titleSize: els.titleSize.value, contentSize: els.contentSize.value, fileName: els.fileName.value,
+      titleSize: els.titleSize.value, contentSize: els.contentSize.value, fileName: els.fileName.value, textName,
     }));
   } catch { /* storage unavailable: nothing to remember */ }
 }
@@ -601,6 +601,7 @@ function restoreSettings() {
   if (saved.titleSize) els.titleSize.value = saved.titleSize;
   if (saved.contentSize) els.contentSize.value = saved.contentSize;
   if (saved.fileName) els.fileName.value = saved.fileName;
+  if (typeof saved.textName === "string" && saved.textName.endsWith(".txt")) textName = saved.textName;
 }
 
 // --- files ------------------------------------------------------------------
@@ -670,12 +671,33 @@ async function openSongFile(file) {
   }
   showMessage("");
   replaceSongs(await readSongFile(file), `"${file.name}"`);
+  rememberTextName(file.name);
+}
+
+// "Save .txt" names the file after the one that was opened: Kumpulan_lagu.docx -> Kumpulan_lagu.txt
+let textName = "songs.txt";
+
+function rememberTextName(fileName) {
+  const base = fileName.replace(/\.(txt|docx?)$/i, "").trim();
+  textName = `${base || "songs"}.txt`;
+  saveSettings();
+}
+
+function saveText() {
+  const text = els.songs.value;
+  if (!text.trim()) {
+    showMessage("There are no songs to save yet.", "error");
+    return;
+  }
+  download(new TextEncoder().encode(text.endsWith("\n") ? text : `${text}\n`), textName, "text/plain;charset=utf-8");
+  showMessage(`Saved ${textName}. Open it here again any time with "Open file".`, "done");
 }
 
 function useWordText(text) {
   const { name } = wordRequest;
   wordRequest = null;
   replaceSongs(text, `"${name}"`);
+  rememberTextName(name);
   const count = parseSongs(text).songs.length;
   showMessage(count
     ? `Converted "${name}": ${plural(count, "song")} found. Check the titles in the preview.`
@@ -742,10 +764,10 @@ function outputName() {
   return /\.pptx$/i.test(name) ? name : `${name}.pptx`;
 }
 
-function download(bytes, name) {
-  const blob = new Blob([bytes], {
-    type: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-  });
+const PPTX_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+
+function download(bytes, name, type = PPTX_TYPE) {
+  const blob = new Blob([bytes], { type });
   const url = URL.createObjectURL(blob);
   const link = el("a");
   link.href = url;
@@ -911,6 +933,7 @@ els.fileName.addEventListener("change", saveSettings);
 els.songFile.addEventListener("change", () => { openSongFile(els.songFile.files[0]); els.songFile.value = ""; });
 els.templateFile.addEventListener("change", () => setTemplate(els.templateFile.files[0]));
 els.clearTemplate.addEventListener("click", () => setTemplate(null));
+els.saveText.addEventListener("click", saveText);
 els.loadExample.addEventListener("click", () => {
   replaceSongs(EXAMPLE, "The example");
 });
